@@ -26,6 +26,12 @@
 *.a
 *.lib
 
+.vs
+bin
+obj
+ARM64
+x64
+
 # Executables
 *.exe
 *.out
