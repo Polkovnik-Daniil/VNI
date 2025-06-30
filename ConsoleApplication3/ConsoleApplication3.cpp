@@ -25,6 +25,10 @@
 #pragma comment(lib, "Ws2_32.lib")
 
 #define _CRT_SECURE_NO_WARNINGS
+#define MAX_PACKET_SIZE 1500
+
+#define FAKE_SRC_IP "10.0.0.1"
+#define FAKE_DST_IP "10.0.0.2"
 
 static WINTUN_CREATE_ADAPTER_FUNC* WintunCreateAdapter;
 static WINTUN_CLOSE_ADAPTER_FUNC* WintunCloseAdapter;
@@ -40,6 +44,37 @@ static WINTUN_RECEIVE_PACKET_FUNC* WintunReceivePacket;
 static WINTUN_RELEASE_RECEIVE_PACKET_FUNC* WintunReleaseReceivePacket;
 static WINTUN_ALLOCATE_SEND_PACKET_FUNC* WintunAllocateSendPacket;
 static WINTUN_SEND_PACKET_FUNC* WintunSendPacket;
+
+
+LPCWSTR charToLPCWSTR(_In_ const char* charArray) {
+    int len;
+    int charArrayLength = strlen(charArray) + 1;
+    len = MultiByteToWideChar(CP_ACP, 0, charArray, charArrayLength, 0, 0);
+    wchar_t* wstr = new wchar_t[len];
+    MultiByteToWideChar(CP_ACP, 0, charArray, charArrayLength, wstr, len);
+    return wstr;
+}
+
+uint16_t checksum(void* data, int len) {
+    uint32_t sum = 0;
+    uint16_t* ptr = (uint16_t*)data;
+    while (len > 1) {
+        sum += *ptr++;
+        len -= 2;
+    }
+    if (len > 0) sum += *(uint8_t*)ptr;
+    while (sum >> 16) sum = (sum & 0xFFFF) + (sum >> 16);
+    return ~sum;
+}
+
+void swap_ip_addresses(uint8_t* packet) {
+    uint8_t temp[4];
+    memcpy(temp, packet + 12, 4);       // source IP
+    memcpy(packet + 12, packet + 16, 4); // destination IP
+    memcpy(packet + 16, temp, 4);       // put old source as destination
+    *(uint16_t*)(packet + 10) = 0;
+    *(uint16_t*)(packet + 10) = checksum(packet, 20);
+}
 
 static HMODULE
 InitializeWintun(void)
@@ -228,6 +263,12 @@ IPChecksum(_In_reads_bytes_(Len) BYTE* Buffer, _In_ DWORD Len)
     return (USHORT)(~Sum);
 }
 
+static void CreateNewUDP(BYTE* Packet, DWORD PacketSize, BYTE* PacketSend) {
+    memcpy(PacketSend, Packet, PacketSize);
+    memcpy(&PacketSend[12], &Packet[16], 4); // src = original dst
+    memcpy(&PacketSend[16], &Packet[12], 4); // dst = original src
+}
+
 static void
 MakeICMP(_Out_writes_bytes_all_(28) BYTE Packet[28])
 {
@@ -244,55 +285,58 @@ MakeICMP(_Out_writes_bytes_all_(28) BYTE Packet[28])
     Log(WINTUN_LOG_INFO, L"Sending IPv4 ICMP echo request to 10.6.7.8 from 10.6.7.7");
 }
 
-static void
-MakeICMPv1(_Out_writes_bytes_all_(28) BYTE Packet[28])
-{
-    memset(Packet, 0, 28);
-    Packet[0] = 0x45;
-    *(USHORT*)&Packet[2] = htons(28);
-    Packet[8] = 255;
-    Packet[9] = 1;
-    *(ULONG*)&Packet[12] = htonl((10 << 24) | (6 << 16) | (7 << 8) | (7 << 0)); /* 10.6.7.7 */
-    *(ULONG*)&Packet[16] = htonl((10 << 24) | (211 << 16) | (55 << 8) | (4 << 0)); /* 10.211.55.4 */
-    *(USHORT*)&Packet[10] = IPChecksum(Packet, 20);
-    Packet[20] = 8;
-    *(USHORT*)&Packet[22] = IPChecksum(&Packet[20], 8);
-    Log(WINTUN_LOG_INFO, L"Sending IPv4 ICMP echo request to 10.6.7.7 from 10.211.55.4");
-}
 
 static DWORD WINAPI
 ReceivePackets(_Inout_ DWORD_PTR SessionPtr)
 {
     WINTUN_SESSION_HANDLE Session = (WINTUN_SESSION_HANDLE)SessionPtr;
     HANDLE WaitHandles[] = { WintunGetReadWaitEvent(Session), QuitEvent };
-    bool x = true;
+
     while (!HaveQuit)
     {
-        DWORD PacketSize;
-        BYTE* Packet = WintunReceivePacket(Session, &PacketSize);
-        if (Packet)
-        {
+        try {
+            DWORD PacketSize;
+            BYTE* Packet = WintunReceivePacket(Session, &PacketSize);
+
+            if (!Packet || PacketSize < 28) {
+                Log(WINTUN_LOG_INFO, L"Error!");
+                DWORD LastError = GetLastError();
+                switch (LastError)
+                {
+                case ERROR_NO_MORE_ITEMS:
+                    DWORD status;
+                    status = WaitForMultipleObjects(_countof(WaitHandles), WaitHandles, FALSE, INFINITE);
+                    if (status == WAIT_OBJECT_0)
+                        continue;
+                    LogError(L"gg", LastError);
+                    return ERROR_SUCCESS;
+                default:
+                    LogError(L"Packet read failed", LastError);
+                    return LastError;
+                }
+            }
+
             PrintPacket(Packet, PacketSize);
+            uint8_t* ipHeader = Packet;
+
+            if (ipHeader[9] != 17) {
+                WintunReleaseReceivePacket(Session, Packet);
+                continue;
+            }
+
+            BYTE* PacketSend = WintunAllocateSendPacket(Session, PacketSize);
+            size_t len;
+            CreateNewUDP(Packet, PacketSize, PacketSend);
+            WintunSendPacket(Session, PacketSend);
             WintunReleaseReceivePacket(Session, Packet);
         }
-        else
-        {
-            DWORD LastError = GetLastError();
-            switch (LastError)
-            {
-            case ERROR_NO_MORE_ITEMS:
-                if (WaitForMultipleObjects(_countof(WaitHandles), WaitHandles, FALSE, INFINITE) == WAIT_OBJECT_0)
-                    continue;
-                return ERROR_SUCCESS;
-            default:
-                LogError(L"Packet read failed", LastError);
-                return LastError;
-            }
+        catch (const std::exception ex) {
+            Log(WINTUN_LOG_INFO, charToLPCWSTR(ex.what()));
         }
     }
+    LogError(L"gg", GetLastError());
     return ERROR_SUCCESS;
 }
-
 
 static DWORD WINAPI
 SendPackets(_Inout_ DWORD_PTR SessionPtr)
@@ -300,10 +344,10 @@ SendPackets(_Inout_ DWORD_PTR SessionPtr)
     WINTUN_SESSION_HANDLE Session = (WINTUN_SESSION_HANDLE)SessionPtr;
     while (!HaveQuit)
     {
+        
         BYTE* Packet = WintunAllocateSendPacket(Session, 28);
         if (Packet)
         {
-            MakeICMPv1(Packet);
             WintunSendPacket(Session, Packet);
         }
         else if (GetLastError() != ERROR_BUFFER_OVERFLOW)
@@ -360,7 +404,7 @@ int __cdecl main(void)
     AddressRow.Address.Ipv4.sin_addr.S_un.S_addr = htonl((10 << 24) | (6 << 16) | (7 << 8) | (7 << 0)); /* 10.6.7.7 */
     AddressRow.OnLinkPrefixLength = 24; /* This is a /24 network */
     AddressRow.DadState = IpDadStatePreferred;
-    LastError = CreateUnicastIpAddressEntry(&AddressRow);
+    LastError = CreateUnicastIpAddressEntry(&AddressRow);   
     if (LastError != ERROR_SUCCESS && LastError != ERROR_OBJECT_ALREADY_EXISTS)
     {
         LogError(L"Failed to set IP address", LastError);
@@ -377,7 +421,7 @@ int __cdecl main(void)
     Log(WINTUN_LOG_INFO, L"Launching threads and mangling packets...");
 
     HANDLE Workers[] = { CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)ReceivePackets, (LPVOID)Session, 0, NULL),
-                         CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)SendPackets, (LPVOID)Session, 0, NULL) };
+                         /*CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)SendPackets, (LPVOID)Session, 0, NULL)*/ };
     if (!Workers[0] || !Workers[1])
     {
         LastError = LogError(L"Failed to create threads", GetLastError());

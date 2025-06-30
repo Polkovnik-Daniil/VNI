@@ -3,7 +3,7 @@ Microsoft Visual Studio Solution File, Format Version 12.00
 # Visual Studio Version 17
 VisualStudioVersion = 17.14.36221.1
 MinimumVisualStudioVersion = 10.0.40219.1
-Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "ConsoleApplication3", "ConsoleApplication3\ConsoleApplication3.vcxproj", "{29A527BA-DE86-4387-AF2D-07E66914C267}"
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "VNI", "ConsoleApplication3\ConsoleApplication3.vcxproj", "{29A527BA-DE86-4387-AF2D-07E66914C267}"
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "ConsoleApplication1", "ConsoleApplication1\ConsoleApplication1.vcxproj", "{4DC60153-A571-4A60-9A73-6FE6C56AEC7E}"
 EndProject

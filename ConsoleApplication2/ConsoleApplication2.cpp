@@ -22,49 +22,59 @@
 
 static WINTUN_GET_ADAPTER_LUID_FUNC* WintunGetAdapterLUID;
 static WINTUN_OPEN_ADAPTER_FUNC*    WinOpenAdapterByName;
-    
-static void SendMessage123(std::string message);
 
 int main()
 {
-    std::this_thread::sleep_for(std::chrono::milliseconds(5000));
-    while (true) {
-        SendMessage123("123");
-    }
-}
+    do {
+        WSADATA wsaData;
+        if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
+            std::cerr << "WSAStartup failed\n";
+            return 1;
+        }
 
-static void SendMessage123(std::string message) {
-    WSADATA wsaData;
-    if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
-        std::cerr << "WSAStartup failed: " << WSAGetLastError() << std::endl;
-        return;
-    }
+        SOCKET clientSocket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        if (clientSocket == INVALID_SOCKET) {
+            std::cerr << "Socket creation failed: " << WSAGetLastError() << "\n";
+            WSACleanup();
+            return 1;
+        }
 
-    SOCKET clientSocket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (clientSocket == INVALID_SOCKET) {
-        std::cerr << "Socket creation failed: " << WSAGetLastError() << std::endl;
-        WSACleanup();
-        return;
-    }
+        sockaddr_in serverAddr;
+        serverAddr.sin_family = AF_INET;
+        serverAddr.sin_port = htons(8080);
 
-    sockaddr_in serverAddr;
-    serverAddr.sin_family = AF_INET;
-    inet_pton(AF_INET, "10.6.7.7", &serverAddr.sin_addr);
-    serverAddr.sin_port = htons(8080);
+        const char* serverIP = "10.6.7.7";
+        if (inet_pton(AF_INET, serverIP, &serverAddr.sin_addr) <= 0) {
+            std::cerr << "Invalid server IP address\n";
+            closesocket(clientSocket);
+            WSACleanup();
+            return 1;
+        }
 
-    if (connect(clientSocket, (sockaddr*)&serverAddr, sizeof(serverAddr)) == SOCKET_ERROR) {
-        std::cerr << "Connect failed: " << WSAGetLastError() << std::endl;
+        if (connect(clientSocket, (sockaddr*)&serverAddr, sizeof(serverAddr)) == SOCKET_ERROR) {
+            std::cerr << "Connect failed: " << WSAGetLastError() << "\n";
+            closesocket(clientSocket);
+            WSACleanup();
+            return 1;
+        }
+
+        std::cout << "Connected to server at " << serverIP << ":8080\n";
+
+        std::string message = "Message client";
+        char buffer[1024];
+        do {
+
+            send(clientSocket, message.c_str(), message.size(), 0);
+
+            int bytesReceived = recv(clientSocket, buffer, sizeof(buffer), 0);
+            if (bytesReceived > 0) {
+                buffer[bytesReceived] = '\0';
+                std::cout << "Server response: " << buffer << "\n";
+            }
+        } while (message != "exit");
+
         closesocket(clientSocket);
         WSACleanup();
-        return;
-    }
-
-    std::cout << "Connected to server!" << std::endl;
-
-    send(clientSocket, message.c_str(), message.size(), 0);
-
-    std::cout << "Sended to server!\t" << message << std::endl;
-
-    closesocket(clientSocket);
-    WSACleanup();
+    } while (true);
 }
+
