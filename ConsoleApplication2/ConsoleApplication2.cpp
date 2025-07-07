@@ -26,6 +26,7 @@ static WINTUN_OPEN_ADAPTER_FUNC*    WinOpenAdapterByName;
 int main()
 {
     do {
+        std::this_thread::sleep_for(std::chrono::milliseconds(4000));
         WSADATA wsaData;
         if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
             std::cerr << "WSAStartup failed\n";
@@ -43,7 +44,7 @@ int main()
         serverAddr.sin_family = AF_INET;
         serverAddr.sin_port = htons(8080);
 
-        const char* serverIP = "10.6.7.7";
+        const char* serverIP = "10.6.7.8";
         if (inet_pton(AF_INET, serverIP, &serverAddr.sin_addr) <= 0) {
             std::cerr << "Invalid server IP address\n";
             closesocket(clientSocket);
@@ -60,16 +61,16 @@ int main()
 
         std::cout << "Connected to server at " << serverIP << ":8080\n";
 
-        std::string message = "Message client";
+        std::string message = "From client";
         char buffer[1024];
         do {
-
+            //std::this_thread::sleep_for(std::chrono::milliseconds(2000));
             send(clientSocket, message.c_str(), message.size(), 0);
 
             int bytesReceived = recv(clientSocket, buffer, sizeof(buffer), 0);
             if (bytesReceived > 0) {
                 buffer[bytesReceived] = '\0';
-                std::cout << "Server response: " << buffer << "\n";
+                std::cout << "Message: " << buffer << "\n";
             }
         } while (message != "exit");
 

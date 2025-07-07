@@ -26,9 +26,10 @@
 
 #define _CRT_SECURE_NO_WARNINGS
 #define MAX_PACKET_SIZE 1500
+#define COUNT_SKIP 15
 
-#define FAKE_SRC_IP "10.0.0.1"
-#define FAKE_DST_IP "10.0.0.2"
+int countSkip = 0;
+bool isReady = 1;
 
 static WINTUN_CREATE_ADAPTER_FUNC* WintunCreateAdapter;
 static WINTUN_CLOSE_ADAPTER_FUNC* WintunCloseAdapter;
@@ -53,27 +54,6 @@ LPCWSTR charToLPCWSTR(_In_ const char* charArray) {
     wchar_t* wstr = new wchar_t[len];
     MultiByteToWideChar(CP_ACP, 0, charArray, charArrayLength, wstr, len);
     return wstr;
-}
-
-uint16_t checksum(void* data, int len) {
-    uint32_t sum = 0;
-    uint16_t* ptr = (uint16_t*)data;
-    while (len > 1) {
-        sum += *ptr++;
-        len -= 2;
-    }
-    if (len > 0) sum += *(uint8_t*)ptr;
-    while (sum >> 16) sum = (sum & 0xFFFF) + (sum >> 16);
-    return ~sum;
-}
-
-void swap_ip_addresses(uint8_t* packet) {
-    uint8_t temp[4];
-    memcpy(temp, packet + 12, 4);       // source IP
-    memcpy(packet + 12, packet + 16, 4); // destination IP
-    memcpy(packet + 16, temp, 4);       // put old source as destination
-    *(uint16_t*)(packet + 10) = 0;
-    *(uint16_t*)(packet + 10) = checksum(packet, 20);
 }
 
 static HMODULE
@@ -250,41 +230,45 @@ PrintPacket(_In_ const BYTE* Packet, _In_ DWORD PacketSize)
         Log(WINTUN_LOG_INFO, L"Received IPv%d proto 0x%x packet from %s to %s", IpVersion, Proto, Src, Dst);
 }
 
-static USHORT
-IPChecksum(_In_reads_bytes_(Len) BYTE* Buffer, _In_ DWORD Len)
-{
-    ULONG Sum = 0;
-    for (; Len > 1; Len -= 2, Buffer += 2)
-        Sum += *(USHORT*)Buffer;
-    if (Len)
-        Sum += *Buffer;
-    Sum = (Sum >> 16) + (Sum & 0xffff);
-    Sum += (Sum >> 16);
-    return (USHORT)(~Sum);
-}
+static void CreateNewMessage(IN BYTE* Packet, IN DWORD PacketSize, OUT BYTE* PacketSend) {
+    
+    if (PacketSize < 20) {
+        return;
+    }
 
-static void CreateNewUDP(BYTE* Packet, DWORD PacketSize, BYTE* PacketSend) {
+    if (countSkip > COUNT_SKIP) {
+        if (isReady) {
+            /* Need swap ports! */
+            BYTE versionAndIHL = Packet[0];
+            BYTE version = versionAndIHL >> 4;
+            if (version != IPPROTO_IPV4) {
+                return;
+            }
+            BYTE ihl = versionAndIHL & 0x0F;
+            DWORD ipHeaderLen = ihl * 4;
+            BYTE* transportHeader = Packet + ipHeaderLen;
+            uint16_t srcPort, dstPort;
+            memcpy(&srcPort, transportHeader, 2);
+            memcpy(&dstPort, transportHeader + 2, 2);
+            memcpy(transportHeader, &dstPort, 2);
+            memcpy(transportHeader + 2, &srcPort, 2);
+
+            isReady = false;
+        }
+        else
+        {
+            isReady = true;
+        }
+    }
+    else
+    {
+        countSkip++;
+    }
+
     memcpy(PacketSend, Packet, PacketSize);
     memcpy(&PacketSend[12], &Packet[16], 4); // src = original dst
     memcpy(&PacketSend[16], &Packet[12], 4); // dst = original src
 }
-
-static void
-MakeICMP(_Out_writes_bytes_all_(28) BYTE Packet[28])
-{
-    memset(Packet, 0, 28);
-    Packet[0] = 0x45;
-    *(USHORT*)&Packet[2] = htons(28);
-    Packet[8] = 255;
-    Packet[9] = 1;
-    *(ULONG*)&Packet[12] = htonl((10 << 24) | (6 << 16) | (7 << 8) | (8 << 0)); /* 10.6.7.8 */
-    *(ULONG*)&Packet[16] = htonl((10 << 24) | (6 << 16) | (7 << 8) | (7 << 0)); /* 10.6.7.7 */
-    *(USHORT*)&Packet[10] = IPChecksum(Packet, 20);
-    Packet[20] = 8;
-    *(USHORT*)&Packet[22] = IPChecksum(&Packet[20], 8);
-    Log(WINTUN_LOG_INFO, L"Sending IPv4 ICMP echo request to 10.6.7.8 from 10.6.7.7");
-}
-
 
 static DWORD WINAPI
 ReceivePackets(_Inout_ DWORD_PTR SessionPtr)
@@ -319,16 +303,21 @@ ReceivePackets(_Inout_ DWORD_PTR SessionPtr)
             PrintPacket(Packet, PacketSize);
             uint8_t* ipHeader = Packet;
 
-            if (ipHeader[9] != 17) {
+            if (ipHeader[9] != IPPROTO_TCP) { //17 -> UDP, 6 -> TCP
                 WintunReleaseReceivePacket(Session, Packet);
                 continue;
             }
 
+            if (countSkip > COUNT_SKIP) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(300));
+                std::cout << "";
+            }
+
             BYTE* PacketSend = WintunAllocateSendPacket(Session, PacketSize);
             size_t len;
-            CreateNewUDP(Packet, PacketSize, PacketSend);
-            WintunSendPacket(Session, PacketSend);
+            CreateNewMessage(Packet, PacketSize, PacketSend);
             WintunReleaseReceivePacket(Session, Packet);
+            WintunSendPacket(Session, PacketSend);
         }
         catch (const std::exception ex) {
             Log(WINTUN_LOG_INFO, charToLPCWSTR(ex.what()));
@@ -420,8 +409,8 @@ int __cdecl main(void)
 
     Log(WINTUN_LOG_INFO, L"Launching threads and mangling packets...");
 
-    HANDLE Workers[] = { CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)ReceivePackets, (LPVOID)Session, 0, NULL),
-                         /*CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)SendPackets, (LPVOID)Session, 0, NULL)*/ };
+    HANDLE Workers[] = { CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)ReceivePackets,  (LPVOID)Session, 0, NULL),
+                         CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)SendPackets,     (LPVOID)Session, 0, NULL) };
     if (!Workers[0] || !Workers[1])
     {
         LastError = LogError(L"Failed to create threads", GetLastError());
